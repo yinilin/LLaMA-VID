@@ -61,8 +61,8 @@ class LlavaLlamaAttForCausalLM(LlamaForCausalLM, LLaMAVIDMetaForCausalLM):
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-        images: Optional[torch.FloatTensor] = None,
-        prompts: Optional[List[str]] = None,
+        products: Optional[torch.FloatTensor] = None,    # 商品的embedding
+        prompts: Optional[List[str]] = None,  ### List[str]代表多轮对话列表
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -72,12 +72,12 @@ class LlavaLlamaAttForCausalLM(LlamaForCausalLM, LLaMAVIDMetaForCausalLM):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         if not self.training:
-            if images[0].device != self.device:
-                images[0] = images[0].to(device=self.device)
+            if products[0].device != self.device:
+                products[0] = products[0].to(device=self.device)
             if input_ids.device != self.device:
                 input_ids = input_ids.to(device=self.device)
 
-        input_ids, attention_mask, past_key_values, inputs_embeds, labels = self.prepare_inputs_labels_for_multimodal(input_ids, attention_mask, past_key_values, labels, images, prompts=prompts)
+        input_ids, attention_mask, past_key_values, inputs_embeds, labels = self.prepare_inputs_labels_for_multimodal(input_ids, attention_mask, past_key_values, labels, products, prompts=prompts)
 
         torch.cuda.empty_cache()
 
@@ -138,7 +138,7 @@ class LlavaLlamaAttForCausalLM(LlamaForCausalLM, LLaMAVIDMetaForCausalLM):
                 "past_key_values": past_key_values,
                 "use_cache": kwargs.get("use_cache"),
                 "attention_mask": attention_mask,
-                "images": kwargs.get("images", None),
+                "products": kwargs.get("products", None),
             }
         )
         return model_inputs

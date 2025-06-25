@@ -57,14 +57,10 @@ class ModelArguments:
     version: Optional[str] = field(default="v0")
     freeze_backbone: bool = field(default=False)
     tune_mm_mlp_adapter: bool = field(default=False)
-    vision_tower: Optional[str] = field(default=None)
-    image_processor: Optional[str] = field(default=None)
-    mm_vision_select_layer: Optional[int] = field(default=-1)   # default to the last layer
     pretrain_mm_mlp_adapter: Optional[str] = field(default=None)
     mm_projector_type: Optional[str] = field(default='linear')
     bert_type: Optional[str] = field(default="qformer_pretrain")
     num_query: Optional[int] = field(default=32)
-    pretrain_qformer: Optional[str] = field(default=None)
     compress_type: Optional[str] = field(default=None)
 
 
@@ -78,8 +74,6 @@ class DataArguments:
     video_folder: Optional[str] = field(default=None)
     video_fps: Optional[int] = field(default=1)
     video_token: Optional[int] = field(default=2)
-    image_aspect_ratio: str = 'square'
-    image_grid_pinpoints: Optional[str] = field(default=None)
     input_prompt: Optional[str] = field(default=None)
     refine_prompt: Optional[bool] = field(default=False)
 
@@ -89,7 +83,6 @@ class TrainingArguments(transformers.TrainingArguments):
     cache_dir: Optional[str] = field(default=None)
     optim: str = field(default="adamw_torch")
     remove_unused_columns: bool = field(default=False)
-    freeze_mm_mlp_adapter: bool = field(default=False)
     mpt_attn_impl: Optional[str] = field(default="triton")
     model_max_length: int = field(
         default=512,
@@ -1043,24 +1036,16 @@ def train():
             scaling_factor = float(math.ceil(training_args.model_max_length / orig_ctx_len))
             config.rope_scaling = {"type": "linear", "factor": scaling_factor}
 
-    if model_args.vision_tower is not None:
-        model = LlavaLlamaAttForCausalLM.from_pretrained(
-            model_args.model_name_or_path,
-            config=config,
-            cache_dir=training_args.cache_dir,
-            **bnb_model_from_pretrained_args
-        )
-    else:
-        model = transformers.LlamaForCausalLM.from_pretrained(
-            model_args.model_name_or_path,
-            config=config,
-            cache_dir=training_args.cache_dir,
-            **bnb_model_from_pretrained_args
-        )
+    model = LlavaLlamaAttForCausalLM.from_pretrained(
+        model_args.model_name_or_path,
+        config=config,
+        cache_dir=training_args.cache_dir,
+        **bnb_model_from_pretrained_args
+    )
     model.config.use_cache = False
 
     if model_args.freeze_backbone:
-        model.model.requires_grad_(False)
+        model.model.requires_grad_(False)  ### 这个backbone指的是LlavaAttLlamaModel，不是llama！！！
 
     if training_args.bits in [4, 8]:
         from peft import prepare_model_for_kbit_training
@@ -1125,40 +1110,22 @@ def train():
         else:
             conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
 
-    if model_args.vision_tower is not None:
-        model.get_model().initialize_vision_modules(
-            model_args=model_args,
-            fsdp=training_args.fsdp,
-            max_token=training_args.model_max_length
-        )
+    model.get_model().initialize_vision_modules(
+        model_args=model_args,
+        fsdp=training_args.fsdp,
+        max_token=training_args.model_max_length
+    )
         
-        vision_tower = model.get_vision_tower()
-        vision_tower.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
+    data_args.is_multimodal = True
 
-        data_args.image_processor = vision_tower.image_processor
-        data_args.is_multimodal = True
-
-        model.config.image_aspect_ratio = data_args.image_aspect_ratio
-        model.config.image_grid_pinpoints = data_args.image_grid_pinpoints
-
-        model.config.tune_mm_mlp_adapter = training_args.tune_mm_mlp_adapter = model_args.tune_mm_mlp_adapter
-        if model_args.tune_mm_mlp_adapter:
-            model.requires_grad_(False)
-            for p in model.get_model().mm_projector.parameters():
-                p.requires_grad = True
-
-        model.config.freeze_mm_mlp_adapter = training_args.freeze_mm_mlp_adapter
-        if training_args.freeze_mm_mlp_adapter:
-            for p in model.get_model().mm_projector.parameters():
-                p.requires_grad = False
+    model.config.tune_mm_mlp_adapter = training_args.tune_mm_mlp_adapter = model_args.tune_mm_mlp_adapter
+    if model_args.tune_mm_mlp_adapter:
+        model.requires_grad_(False)
+        for p in model.get_model().mm_projector.parameters():
+            p.requires_grad = True
 
         if training_args.bits in [4, 8]:
             model.get_model().mm_projector.to(dtype=compute_dtype, device=training_args.device)
-
-        model.config.mm_use_im_start_end = data_args.mm_use_im_start_end = model_args.mm_use_im_start_end
-        training_args.use_im_start_end = model_args.mm_use_im_start_end
-        model.config.mm_use_im_patch_token = model_args.mm_use_im_patch_token
-        model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer)
 
     # all the attention modules require grad
     model.get_model().initialize_attention_modules(model_args)

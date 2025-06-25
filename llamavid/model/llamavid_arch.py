@@ -42,9 +42,11 @@ class LLaMAVIDMetaModel:
     def __init__(self, config):
         super(LLaMAVIDMetaModel, self).__init__(config)
 
-        if hasattr(config, "mm_vision_tower"):
+        '''if hasattr(config, "mm_vision_tower"):
             self.vision_tower = build_vision_tower(config, delay_load=True)
-            self.mm_projector = build_vision_projector(config)
+            self.mm_projector = build_vision_projector(config)'''
+        self.config.mm_hidden_size = getattr(config, 'mm_hidden_size', 768)
+        self.mm_projector = build_vision_projector(config)
 
     def get_vision_tower(self):
         vision_tower = getattr(self, 'vision_tower', None)
@@ -53,26 +55,11 @@ class LLaMAVIDMetaModel:
         return vision_tower
 
     def initialize_vision_modules(self, model_args, fsdp=None, max_token=2048):
-        vision_tower = model_args.vision_tower
-        mm_vision_select_layer = model_args.mm_vision_select_layer
-        mm_vision_select_feature = model_args.mm_vision_select_feature
-        pretrain_mm_mlp_adapter = model_args.pretrain_mm_mlp_adapter
-
-        self.config.mm_vision_tower = vision_tower
-        self.config.image_processor = getattr(model_args, 'image_processor', None)
-
-        vision_tower = build_vision_tower(model_args)
-
-        if fsdp is not None and len(fsdp) > 0:
-            self.vision_tower = [vision_tower]
-        else:
-            self.vision_tower = vision_tower
+        ### 保留projection,去掉encoder
+        pretrain_mm_mlp_adapter = model_args.pretrain_mm_mlp_adapter  
 
         self.config.use_mm_proj = True
         self.config.mm_projector_type = getattr(model_args, 'mm_projector_type', 'linear')
-        self.config.mm_hidden_size = vision_tower.hidden_size
-        self.config.mm_vision_select_layer = mm_vision_select_layer
-        self.config.mm_vision_select_feature = mm_vision_select_feature
         self.config.max_token = max_token
         
         if getattr(self, 'mm_projector', None) is None:
@@ -91,74 +78,55 @@ class LLaMAVIDMetaModel:
 
     def initialize_attention_modules(self, model_args, for_eval=False):  
         pretrain_mm_mlp_adapter = getattr(model_args, "pretrain_mm_mlp_adapter", None)
-        pretrain_qformer = getattr(model_args, "pretrain_qformer", None)
-        self.config.bert_type = getattr(model_args, "bert_type", "qformer")
-        self.config.num_query = getattr(model_args, "num_query", 32)
+        self.config.bert_type = getattr(model_args, "bert_type", "raw_bert_layer:2")
         self.config.compress_type = getattr(model_args, "compress_type", None)
 
-        if 'pretrain' in self.config.bert_type:
-            # for qformer that use evaclip for prtrain
-            att_feat_size = 1408
-        else:
-            att_feat_size = self.config.mm_hidden_size
-        self.vlm_att_tokenlizer, self.vlm_att_encoder, self.vlm_att_query = self.init_bert(att_feat_size, truncation_side="left")
-        self.vlm_att_projector = torch.nn.Linear(self.vlm_att_encoder.config.hidden_size, self.config.mm_hidden_size)
-        self.vlm_att_key_projector  = torch.nn.Linear(self.config.mm_hidden_size, self.config.mm_hidden_size)
-        self.vlm_att_val_projector  = torch.nn.Linear(self.config.mm_hidden_size, self.config.hidden_size)
+        att_feat_size = self.config.mm_hidden_size
+        self.vlm_att_tokenlizer, self.vlm_att_encoder = self.init_bert(att_feat_size, truncation_side="left")
+        self.vlm_att_projector = torch.nn.Linear(self.vlm_att_encoder.config.hidden_size, self.config.mm_hidden_size)  ### 从text decoder 到 context attention的映射，得到text query
+        self.vlm_att_key_projector  = torch.nn.Linear(self.config.mm_hidden_size, self.config.mm_hidden_size)  ### 从vision encoder到 context attention中的projection，是跨注意力的一部分
+        self.vlm_att_val_projector  = torch.nn.Linear(self.config.mm_hidden_size, self.config.hidden_size)  ### 计算完attention后的projection部分
 
         if "raw" in self.config.bert_type:
-            self.vlm_att_bert_proj  = torch.nn.Linear(att_feat_size, self.vlm_att_encoder.config.hidden_size)
-        elif "pretrain" in self.config.bert_type and self.config.mm_hidden_size!=att_feat_size:
-            self.vlm_att_bert_proj = torch.nn.Linear(self.config.mm_hidden_size, att_feat_size)
+            ### 代表Xt到bert到projection，必要
+            self.vlm_att_bert_proj  = torch.nn.Linear(att_feat_size, self.vlm_att_encoder.config.hidden_size)  ### 用于将vision embedding到text decoder维度的映射
         else:
             self.vlm_att_bert_proj = None
         
         def get_w(weights, keyword):
             return {k.split(keyword + '.')[1]: v for k, v in weights.items() if keyword in k}
         
-        if 'qformer_pretrain' in self.config.bert_type:
-            self.vlm_att_ln = torch.nn.LayerNorm(att_feat_size)
-        
-        if pretrain_qformer is not None:
-            print("Loading pretrained qformer weights...")
-            qformer_weight = torch.load(pretrain_qformer, map_location='cpu')['model']
-            bert_weight = {_key: qformer_weight[_key] for _key in qformer_weight if 'bert' in _key}
-            self.vlm_att_encoder.load_state_dict(get_w(bert_weight, 'Qformer'))
-            self.vlm_att_ln.load_state_dict(get_w(qformer_weight, 'ln_vision'))
-            self.vlm_att_query.data = qformer_weight['query_tokens']
-        
         if 'freeze_all' in self.config.bert_type:
-            print("Freezing all qformer weights...")
+            print("Freeze bert and attention weights...")
             self.vlm_att_encoder.requires_grad_(False)
-            self.vlm_att_ln.requires_grad_(False)
-            self.vlm_att_query.requires_grad_(False)
             self.vlm_att_projector.requires_grad_(False)
             self.vlm_att_key_projector.requires_grad_(False)
             self.vlm_att_val_projector.requires_grad_(False)
         elif 'freeze' in self.config.bert_type:
-            print("Freezing pretrained qformer weights...")
+            print("only freeze bert weights...")
             self.vlm_att_encoder.requires_grad_(False)
-            self.vlm_att_ln.requires_grad_(False)
-            self.vlm_att_query.requires_grad_(False)
-        
 
-        if pretrain_mm_mlp_adapter is not None:
+        if pretrain_mm_mlp_adapter is not None:   ### att_projector_weights包含vlm_att_projector、vlm_att_key_projector、vlm_att_val_projector
             att_projector_weights = torch.load(pretrain_mm_mlp_adapter, map_location='cpu')
         else:
             trainable_module = ['vlm_att_encoder', 'vlm_att_projector', 'vlm_att_key_projector', 
-                                'vlm_att_val_projector', 'vlm_att_query', 'vlm_att_visual_proj',
-                                'vlm_att_ln']
+                                'vlm_att_val_projector']
             if hasattr(model_args, 'model_name_or_path'):
                 model_save_path = model_args.model_name_or_path
             else:
                 model_save_path = model_args.model_path
             model_idx_path = getattr(model_args, 'model_path', model_save_path)
-            weight_file = json.load(open(os.path.join(model_idx_path, 'pytorch_model.bin.index.json'), 'r'))['weight_map']
-            model_path = set([weight_file[_key] for _key in weight_file if any([_module in _key for _module in trainable_module])])
-            att_projector_weights = {}
-            for _model in model_path:
-                att_projector_weights.update(torch.load(os.path.join(model_idx_path, _model), map_location='cpu'))
-            if len(att_projector_weights) == 0:
+            ###  增加处理，对没有pytorch_model.bin.index.json的情况
+            try:
+                weight_file = json.load(open(os.path.join(model_idx_path, 'pytorch_model.bin.index.json'), 'r'))['weight_map']
+                model_path = set([weight_file[_key] for _key in weight_file if any([_module in _key for _module in trainable_module])])
+                att_projector_weights = {}
+                for _model in model_path:
+                    att_projector_weights.update(torch.load(os.path.join(model_idx_path, _model), map_location='cpu'))
+                if len(att_projector_weights) == 0:
+                    return
+            except FileNotFoundError:
+                print(f"Warning: No pytorch_model.bin.index.json found in {model_idx_path}, using randomly initialized attention modules.")
                 return
         
         bert_dict = get_w(att_projector_weights, 'vlm_att_encoder')
@@ -169,17 +137,6 @@ class LLaMAVIDMetaModel:
         self.vlm_att_projector.load_state_dict(get_w(att_projector_weights, 'vlm_att_projector'))
         self.vlm_att_key_projector.load_state_dict(get_w(att_projector_weights, 'vlm_att_key_projector'))
         self.vlm_att_val_projector.load_state_dict(get_w(att_projector_weights, 'vlm_att_val_projector'))
-
-        if "qformer" in self.config.bert_type:
-            print('Loading vlm_att_query weights...')
-            self.vlm_att_query.data = att_projector_weights['model.vlm_att_query']
-            if "pretrain" in self.config.bert_type:
-                print('Loading vlm_att_ln weights...')
-                self.vlm_att_ln.load_state_dict(get_w(att_projector_weights, 'vlm_att_ln'))
-
-        if self.vlm_att_bert_proj is not None:
-            print('Loading vlm_att_bert_proj weights...')
-            self.vlm_att_bert_proj.load_state_dict(get_w(att_projector_weights, 'vlm_att_bert_proj'))
         
         if for_eval:
             weight_type = torch.float16
@@ -188,40 +145,23 @@ class LLaMAVIDMetaModel:
             self.vlm_att_projector = self.vlm_att_projector.to(device=device_type, dtype=weight_type)
             self.vlm_att_key_projector = self.vlm_att_key_projector.to(device=device_type, dtype=weight_type)
             self.vlm_att_val_projector = self.vlm_att_val_projector.to(device=device_type, dtype=weight_type)
-
-            if "qformer" in self.config.bert_type:
-                self.vlm_att_query.data = self.vlm_att_query.data.to(device=device_type, dtype=weight_type)
-                if "pretrain" in self.config.bert_type:
-                    self.vlm_att_ln = self.vlm_att_ln.to(device=device_type, dtype=weight_type)
-            
-            if self.vlm_att_bert_proj is not None:
-                self.vlm_att_bert_proj = self.vlm_att_bert_proj.to(device=device_type, dtype=weight_type)
             
 
     def init_bert(self, vision_width, cross_attention_freq=2, truncation_side="right"):
         # initialize BERT tokenizer
-        tokenizer = BertTokenizer.from_pretrained("bert-base-uncased", truncation_side=truncation_side)
+        tokenizer = BertTokenizer.from_pretrained("data/bert-base-uncased", truncation_side=truncation_side)
         tokenizer.add_special_tokens({"bos_token": "[DEC]"})
         # initialize BERT
-        encoder_config = BertConfig.from_pretrained("bert-base-uncased")
+        encoder_config = BertConfig.from_pretrained("data/bert-base-uncased")
         encoder_config.encoder_width = vision_width
         # insert cross-attention layer every other block
         encoder_config.add_cross_attention = True
         encoder_config.cross_attention_freq = cross_attention_freq
-        query_tokens = None
         
-        if "qformer" in self.config.bert_type:
-            mm_model = BertLMHeadModelQF.from_pretrained(
-                "bert-base-uncased", config=encoder_config
-            )
-            query_tokens = nn.Parameter(
-                torch.zeros(1, self.config.num_query, encoder_config.hidden_size)
-            )
-            query_tokens.data.normal_(mean=0.0, std=encoder_config.initializer_range)
-        elif "raw" in self.config.bert_type:
+        if "raw" in self.config.bert_type:
             encoder_config.is_decoder = True
             mm_model = BertLMHeadModelRaw.from_pretrained(
-                "bert-base-uncased", config=encoder_config
+                "data/bert-base-uncased", config=encoder_config
             )
         else:
             raise NotImplementedError("BERT type not implemented...")
@@ -234,7 +174,7 @@ class LLaMAVIDMetaModel:
             mm_model.bert.encoder.layer = mm_model.bert.encoder.layer[:layer_num]
             print(f"Only use {layer_num} layers in BERT...")
         
-        return tokenizer, mm_model, query_tokens
+        return tokenizer, mm_model
 
 
 class LLaMAVIDMetaForCausalLM(ABC):
@@ -246,126 +186,76 @@ class LLaMAVIDMetaForCausalLM(ABC):
     def get_vision_tower(self):
         return self.get_model().get_vision_tower()
 
-    def encode_images(self, images, prompts=None, image_counts=None, long_video=False):        
-        if long_video:
-            # use pre-computed features
-            image_features = images
-        else:
-            image_features = self.get_model().get_vision_tower()(images)
-
-        image_features = self.vlm_attention(image_features, 
+    def encode_images(self, product_features, prompts=None, image_counts=None):  
+        ### 为每个图像生成n+1个特征token   
+        ### product_features: (batch*num_product, embedding_dim)
+        ### 每个products对应两个token，返回形状[prompt数, frame数 * n_token, C]
+        ### 这里的prompt是文本，还没有tokenize
+        product_features = self.vlm_attention(product_features, 
                                             prompts=prompts, 
-                                            image_counts=image_counts,
-                                            long_video=long_video)
-        return image_features
+                                            image_counts=image_counts)
+        return product_features
 
-    def vlm_attention(self, image_features, prompts=None, image_counts=None, long_video=False):        
+    def vlm_attention(self, product_features, prompts=None, image_counts=None):     
+        ### product_features: (batch*num_product, product_seq_len, embedding_dim)
+        ### prompts: List[List[str]]，每个batch对应一个prompt，可能包含多轮对话
+        ### 要注意每个一个batch里的图片数量可能不一样，所以需要image_counts来指明
+        ### image_counts： [num_frames1, num_frames2, ...]，每个batch的图像数量
+        ### 该函数的目的是提取每一个图像的context token和content token，形成列表返回
         img_feat_lst = []
         if image_counts is None:
-            assert len(image_features) == len(prompts), f"Size mismatch! image_features: {len(image_features)}, prompts: {len(prompts)}"
+            assert len(product_features) == len(prompts), f"Size mismatch! product_features: {len(product_features)}, prompts: {len(prompts)}"
         else:
             assert len(prompts) == len(image_counts), f"Size mismatch! prompts: {len(prompts)}, image_counts: {len(image_counts)}"
-        image_atts = torch.ones(image_features.size()[:-1], dtype=torch.long).to(image_features.device)    
+        image_atts = torch.ones(product_features.size()[:-1], dtype=torch.long).to(product_features.device)   ### attention矩阵，
 
         total_count = 0
         # calculate each image feat according to the prompt
         for _idx in range(len(prompts)):
-            assert isinstance(prompts[_idx], list), f"Prompt should be a list, but got {type(prompts[_idx])}"
-            input_token = self.get_model().vlm_att_tokenlizer(
+            assert (len(prompts[_idx]), 1), f"Prompt should be a list with length 1, but got {type(prompts[_idx])} with length {len(prompts[_idx])}."
+            ### prompts[_idx]也是一个列表
+            input_token = self.get_model().vlm_att_tokenlizer(  ### 这里是bert的tokenizer
                 prompts[_idx], 
                 padding='longest', 
                 truncation=True,
                 max_length=256,
                 return_tensors="pt"
-                ).to(image_features.device)
+                ).to(product_features.device)
 
-            input_ids = input_token.input_ids
+            input_ids = input_token.input_ids  ### (prompt_sentence_num, seq_len)
             attention_masks = input_token.attention_mask
             
             if image_counts is None:
-                img_feat_prompt = image_features[_idx, None].expand(len(prompts[_idx]), -1, -1)
-                img_att_prompt = image_atts[_idx, None].expand(len(prompts[_idx]), -1)
+                img_feat_prompt = product_features[_idx, None].expand(len(prompts[_idx]), -1, -1)  ### (prompt_sentence_num, product_seq_len, feat_dim)
+                img_att_prompt = image_atts[_idx, None].expand(len(prompts[_idx]), -1)  ### (prompt_sentence_num, product_seq_len)
             else:
-                # shape: [prompt_num*frame_num, image_shape, feat_dim]
-                img_feat_prompt = image_features[total_count:total_count+image_counts[_idx]]
-                img_feat_prompt = img_feat_prompt[None].expand(len(prompts[_idx]), -1, -1, -1).flatten(0,1)
+                # shape: [prompt_num*frame_num, product_seq_len, feat_dim]
+                img_feat_prompt = product_features[total_count:total_count+image_counts[_idx]]  ### 得到image_counts[_idx]个图像的特征
+                img_feat_prompt = img_feat_prompt[None].expand(len(prompts[_idx]), -1, -1, -1).flatten(0,1)  ### (prompt_sentence_num*num_product, product_seq_len, feat_dim)
                 img_att_prompt = image_atts[total_count:total_count+image_counts[_idx]]
                 img_att_prompt = img_att_prompt[None].expand(len(prompts[_idx]), -1, -1).flatten(0,1)
-                input_ids = input_ids[:,None].expand(-1, image_counts[_idx], -1).flatten(0,1)
+                input_ids = input_ids[:,None].expand(-1, image_counts[_idx], -1).flatten(0,1)  ### (prompt_sentence_num*num_product, seq_len),把prompt里每个语句的tokens重复num_product次
                 attention_masks = attention_masks[:,None].expand(-1, image_counts[_idx], -1).flatten(0,1)
                 total_count += image_counts[_idx]
             
-            if "pretrain" in self.config.bert_type and self.get_model().vlm_att_bert_proj is not None:
-                bert_feat = self.get_model().vlm_att_bert_proj(img_feat_prompt)
-            else:
-                bert_feat = img_feat_prompt.clone()
-
-            # remove cls embedding
-            if self.config.mm_vision_select_feature == 'patch':
-                if img_feat_prompt.shape[1]%2 == 1:
-                    img_feat_prompt = img_feat_prompt[:, 1:]
-
-            if "qformer" in self.config.bert_type:
-                query_tokens = self.get_model().vlm_att_query.expand(bert_feat.shape[0], -1, -1)
-                query_atts = torch.cat([torch.ones(query_tokens.size()[:-1], dtype=torch.long).to(bert_feat.device), 
-                                        attention_masks],dim=1)
-                
-                if 'pretrain' in self.config.bert_type:
-                    mm_img_in = self.get_model().vlm_att_ln(bert_feat)
-                else:
-                    mm_img_in = bert_feat
-                
-                if long_video:
-                    outputs = []
-                    block_size = 64
-                    for L in range(0, len(input_ids), block_size):
-                        R = L + block_size
-                        mm_output = self.get_model().vlm_att_encoder.bert(
-                            input_ids[L:R],
-                            query_embeds=query_tokens[L:R],
-                            attention_mask=query_atts[L:R],
-                            encoder_hidden_states=mm_img_in[L:R],
-                            encoder_attention_mask=img_att_prompt[L:R],
-                            return_dict=True,
-                        )
-                        mm_output = mm_output.last_hidden_state[:,:query_tokens.shape[1]]
-                        outputs.append(mm_output)
-                    mm_output = torch.cat(outputs)
-                    torch.cuda.empty_cache()
-                else:
-                    mm_output = self.get_model().vlm_att_encoder.bert(
-                        input_ids,
-                        query_embeds=query_tokens,
-                        attention_mask=query_atts,
-                        encoder_hidden_states=mm_img_in,
-                        encoder_attention_mask=img_att_prompt,
-                        return_dict=True,
-                    )
-                    mm_output = mm_output.last_hidden_state[:,:query_tokens.shape[1]]
-                
-            elif "raw" in self.config.bert_type:
-                if self.config.mm_vision_select_feature == 'patch' and bert_feat.shape[1]%2 == 1:
-                    bert_feat = bert_feat[:, 1:]
-                    img_att_prompt = img_att_prompt[:, 1:]
-                
-                mm_output = self.get_model().vlm_att_encoder.bert(
-                    input_ids,
-                    attention_mask=attention_masks,
-                    encoder_hidden_states=self.get_model().vlm_att_bert_proj(bert_feat),
-                    encoder_attention_mask=img_att_prompt,
-                    return_dict=True,
-                )
-                mm_output = mm_output.last_hidden_state
-            else:
-                raise ValueError(f'Unexpected bert type: {self.config.bert_type}')
+            bert_feat = img_feat_prompt.clone()
             
+            mm_output = self.get_model().vlm_att_encoder.bert(
+                input_ids,
+                attention_mask=attention_masks,
+                encoder_hidden_states=self.get_model().vlm_att_bert_proj(bert_feat),
+                encoder_attention_mask=img_att_prompt,
+                return_dict=True,
+            )
+            
+            mm_output = mm_output.last_hidden_state
             text_q = self.get_model().vlm_att_projector(mm_output)
-            final_token = self.token_generation(text_q, img_feat_prompt, long_video=long_video)
+            final_token = self.token_generation(text_q, img_feat_prompt)
 
             if image_counts is not None:
-                # shape: [prompt_num, frame_num*image_shape, feat_dim]
+                # shape: [product_num，n, feat_dim]
                 final_token = final_token.reshape(len(prompts[_idx]), image_counts[_idx], *final_token.shape[-2:])
-                final_token = final_token.flatten(1,2)
+                final_token = final_token.squeeze(0)
             img_feat_lst.append(final_token)
 
         return img_feat_lst
@@ -415,52 +305,33 @@ class LLaMAVIDMetaForCausalLM(ABC):
         self.prompts = prompts
 
     def prepare_inputs_labels_for_multimodal(
-        self, input_ids, attention_mask, past_key_values, labels, images, prompts=None
+        self, input_ids, attention_mask, past_key_values, labels, products, prompts=None
     ): 
+        
         if prompts is None and hasattr(self, 'prompts'):
             prompts = self.prompts
-        
-        vision_tower = self.get_vision_tower()
-        if vision_tower is None or images is None or input_ids.shape[1] == 1:
-            if past_key_values is not None and vision_tower is not None and images is not None and input_ids.shape[1] == 1:
-                attention_mask = torch.ones((attention_mask.shape[0], past_key_values[-1][-1].shape[-2] + 1), dtype=attention_mask.dtype, device=attention_mask.device)
-            return input_ids, attention_mask, past_key_values, None, labels
-        
-        # pre-process images for long video
-        if images[0].shape[-1] > 1000:
-            long_video = True
+        ### 这里的prompt是原文本，不是input_ids，是用来在text decoder做融合的，input_ids里有image位置的标记，所以不能直接用。
+        ### 这里的输入特征已经是encoder后的向量
+        ### products形状:(num_products, product_seq_len, embedding_dim)的列表，列表长度为batch，image_counts用来处理每个batch中商品数量不同
+        if type(products) is list:
+            image_counts = [i.shape[0] for i in products]
+            concat_images = torch.cat(products, dim=0)  ### 形状为(batch*num_product, product_seq_len, embedding_dim)
+            image_features = self.encode_images(concat_images, prompts, image_counts)
         else:
-            long_video = False
+            ### 如果products不是列表，只有一个batch，就不需要concat
+            image_features = self.encode_images(products, prompts)
 
-        if type(images) is list or images.ndim == 5:
-            # not reseshape for long video
-            if not long_video:
-                images = [image if len(image.shape) == 4 else image.unsqueeze(0) for image in images]
-            image_counts = [image.shape[0] for image in images]
-            concat_images = torch.cat(images, dim=0)
-            image_features = self.encode_images(concat_images, prompts, image_counts, long_video=long_video)
-        else:
-            image_features = self.encode_images(images, prompts, long_video=long_video)
-
+        ### image_features:[(num_product，n(受compresss_type影响), 4096),……]
         new_input_embeds = []
         new_labels = [] if labels is not None else None
         cur_image_idx = 0
         for batch_idx, cur_input_ids in enumerate(input_ids):
             if (cur_input_ids == IMAGE_TOKEN_INDEX).sum() == 0:
                 # multimodal LLM, but the current sample is not multimodal
-                # FIXME: this is a hacky fix, for deepspeed zero3 to work
-                half_len = cur_input_ids.shape[0] // 2
-                if isinstance(image_features, list):
-                    cur_image_features = image_features[cur_image_idx][0]
-                else:
-                    cur_image_features = image_features[cur_image_idx]
-                cur_input_embeds_1 = self.get_model().embed_tokens(cur_input_ids[:half_len])
-                cur_input_embeds_2 = self.get_model().embed_tokens(cur_input_ids[half_len:])
-                cur_input_embeds = torch.cat([cur_input_embeds_1, cur_image_features[0:0], cur_input_embeds_2], dim=0)
+                cur_input_embeds = self.get_model().embed_tokens(cur_input_ids)
                 new_input_embeds.append(cur_input_embeds)
                 if labels is not None:
                     new_labels.append(labels[batch_idx])
-                cur_image_idx += 1
                 continue
             
             image_token_indices = torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0]
@@ -470,70 +341,36 @@ class LLaMAVIDMetaForCausalLM(ABC):
                 cur_new_labels = []
                 assert cur_labels.shape == cur_input_ids.shape
             
-            if not long_video:
-                token_idx = 0
-                while image_token_indices.numel() > 0:
-                    if isinstance(image_features, list):
-                        cur_image_features = image_features[cur_image_idx][token_idx]
-                    else:
-                        cur_image_features = image_features[cur_image_idx]
-                    image_token_start = image_token_indices[0]
-                    
-                    if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
-                        cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids[:image_token_start-1]).detach())
-                        cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids[image_token_start-1:image_token_start]))
-                        cur_new_input_embeds.append(cur_image_features)
-                        cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids[image_token_start+1:image_token_start+2]))
-                        if labels is not None:
-                            cur_new_labels.append(cur_labels[:image_token_start])
-                            cur_new_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=labels.device, dtype=labels.dtype))
-                            cur_new_labels.append(cur_labels[image_token_start:image_token_start+1])
-                            cur_labels = cur_labels[image_token_start+2:]
-                    else:
-                        cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids[:image_token_start]))
-                        cur_new_input_embeds.append(cur_image_features)
-                        if labels is not None:
-                            cur_new_labels.append(cur_labels[:image_token_start])
-                            cur_new_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=labels.device, dtype=labels.dtype))
-                            cur_labels = cur_labels[image_token_start+1:]
-                    if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
-                        cur_input_ids = cur_input_ids[image_token_start+2:]
-                    else:
-                        cur_input_ids = cur_input_ids[image_token_start+1:]
-                    image_token_indices = torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0]
-                    token_idx += 1
-                
-                # changle image idx after processing one sample
-                cur_image_idx += 1
-                if cur_input_ids.numel() > 0:
-                    if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
-                        cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids).detach())
-                    else:
-                        cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids))
-                    if labels is not None:
-                        cur_new_labels.append(cur_labels)
-                cur_new_input_embeds = [x.to(device=self.device) for x in cur_new_input_embeds]
-                cur_new_input_embeds = torch.cat(cur_new_input_embeds, dim=0)
-                new_input_embeds.append(cur_new_input_embeds)
-                if labels is not None:
-                    cur_new_labels = torch.cat(cur_new_labels, dim=0)
-                    new_labels.append(cur_new_labels)
-            else:
-                cur_new_input_embeds = torch.Tensor(len(cur_input_ids), self.config.hidden_size).to(dtype=self.dtype, device=self.device)
-                text_token_indices = torch.where(cur_input_ids != IMAGE_TOKEN_INDEX)[0]
-                if not self.training and self.get_model().embed_tokens.weight.device != cur_input_ids.device:
-                    model_device = self.get_model().embed_tokens.weight.device
-                    data_device = cur_input_ids.device
-                    cur_input_ids_text = cur_input_ids[text_token_indices].to(device=model_device)
-                    cur_new_input_embeds[text_token_indices] = self.get_model().embed_tokens(cur_input_ids_text).to(device=data_device)
+            ### 进行图像特征和文本特征拼接
+            token_idx = 0  ### image占位符计数
+            while image_token_indices.numel() > 0:
+                if isinstance(image_features, list):
+                    cur_image_features = image_features[cur_image_idx][token_idx]
                 else:
-                    cur_new_input_embeds[text_token_indices] = self.get_model().embed_tokens(cur_input_ids[text_token_indices])
-                cur_image_features = image_features[cur_image_idx]
-                cur_new_input_embeds[image_token_indices] = cur_image_features
-                new_input_embeds.append(cur_new_input_embeds)
+                    cur_image_features = image_features[cur_image_idx]
+                image_token_start = image_token_indices[0]
+                cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids[:image_token_start]))
+                cur_new_input_embeds.append(cur_image_features)
                 if labels is not None:
-                    new_labels.append(cur_labels)
-                cur_image_idx += 1
+                    cur_new_labels.append(cur_labels[:image_token_start])
+                    cur_new_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=labels.device, dtype=labels.dtype))
+                    cur_labels = cur_labels[image_token_start+1:]
+                cur_input_ids = cur_input_ids[image_token_start+1:]
+                image_token_indices = torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0]
+                token_idx += 1
+            
+            # changle image idx after processing one sample
+            cur_image_idx += 1
+            if cur_input_ids.numel() > 0:  ### 处理完所有image token后，剩余的文本token
+                cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids))
+                if labels is not None:
+                    cur_new_labels.append(cur_labels)
+            cur_new_input_embeds = [x.to(device=self.device) for x in cur_new_input_embeds]
+            cur_new_input_embeds = torch.cat(cur_new_input_embeds, dim=0)
+            new_input_embeds.append(cur_new_input_embeds)
+            if labels is not None:
+                cur_new_labels = torch.cat(cur_new_labels, dim=0)
+                new_labels.append(cur_new_labels)
 
         if any(x.shape != new_input_embeds[0].shape for x in new_input_embeds):
             max_len = max(x.shape[0] for x in new_input_embeds)
@@ -572,49 +409,5 @@ class LLaMAVIDMetaForCausalLM(ABC):
                 new_attn_mask_pad_left = torch.full((attention_mask.shape[0], new_input_embeds.shape[1] - input_ids.shape[1]), True, dtype=attention_mask.dtype, device=attention_mask.device)
                 attention_mask = torch.cat((new_attn_mask_pad_left, attention_mask), dim=1)
                 assert attention_mask.shape == new_input_embeds.shape[:2]
-
+        ### input_embeds: (batch, seq_len, hidden_size)
         return None, attention_mask, past_key_values, new_input_embeds, new_labels
-
-    def initialize_vision_tokenizer(self, model_args, tokenizer):
-        if model_args.mm_use_im_patch_token:
-            tokenizer.add_tokens([DEFAULT_IMAGE_PATCH_TOKEN], special_tokens=True)
-            self.resize_token_embeddings(len(tokenizer))
-
-        if model_args.mm_use_im_start_end:
-            num_new_tokens = tokenizer.add_tokens([DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True)
-            self.resize_token_embeddings(len(tokenizer))
-
-            if num_new_tokens > 0:
-                input_embeddings = self.get_input_embeddings().weight.data
-                output_embeddings = self.get_output_embeddings().weight.data
-
-                input_embeddings_avg = input_embeddings[:-num_new_tokens].mean(
-                    dim=0, keepdim=True)
-                output_embeddings_avg = output_embeddings[:-num_new_tokens].mean(
-                    dim=0, keepdim=True)
-
-                input_embeddings[-num_new_tokens:] = input_embeddings_avg
-                output_embeddings[-num_new_tokens:] = output_embeddings_avg
-
-            if model_args.tune_mm_mlp_adapter:
-                for p in self.get_input_embeddings().parameters():
-                    p.requires_grad = True
-                for p in self.get_output_embeddings().parameters():
-                    p.requires_grad = False
-
-            if model_args.pretrain_mm_mlp_adapter:
-                mm_projector_weights = torch.load(model_args.pretrain_mm_mlp_adapter, map_location='cpu')
-                embed_tokens_weight = mm_projector_weights['model.embed_tokens.weight']
-                assert num_new_tokens == 2
-                if input_embeddings.shape == embed_tokens_weight.shape:
-                    input_embeddings[-num_new_tokens:] = embed_tokens_weight[-num_new_tokens:]
-                elif embed_tokens_weight.shape[0] == num_new_tokens:
-                    input_embeddings[-num_new_tokens:] = embed_tokens_weight
-                else:
-                    raise ValueError(f"Unexpected embed_tokens_weight shape. Pretrained: {embed_tokens_weight.shape}. Current: {input_embeddings.shape}. Numer of new tokens: {num_new_tokens}.")
-        elif model_args.mm_use_im_patch_token:
-            if model_args.tune_mm_mlp_adapter:
-                for p in self.get_input_embeddings().parameters():
-                    p.requires_grad = False
-                for p in self.get_output_embeddings().parameters():
-                    p.requires_grad = False
