@@ -156,16 +156,7 @@ class LLaVATrainer(Trainer):
         if self.train_dataset is None or not has_length(self.train_dataset):
             return None
 
-        if self.args.group_by_modality_length:
-            lengths = self.train_dataset.modality_lengths
-            return LengthGroupedSampler(
-                self.args.train_batch_size,
-                world_size=self.args.world_size, # * self.args.gradient_accumulation_steps, # Keep raw setting
-                lengths=lengths,
-                group_by_modality=True,
-            )
-        else:
-            return super()._get_train_sampler()
+        return super()._get_train_sampler()
 
     def create_optimizer(self):
         """
@@ -181,69 +172,24 @@ class LLaVATrainer(Trainer):
 
         opt_model = self.model
 
-        if self.args.lr_multi is not None:
-            lr_multi_dict = {}
-            for _dict in self.args.lr_multi.split('\\'):
-                _key_val = _dict.split(':')
-                lr_multi_dict[_key_val[0]] = float(_key_val[1])
-
         if self.optimizer is None:
             decay_parameters = get_parameter_names(opt_model, ALL_LAYERNORM_LAYERS)
             decay_parameters = [name for name in decay_parameters if "bias" not in name]
-            if self.args.lr_multi is not None:
-                optimizer_grouped_parameters = [
-                    {
-                        "params": [
-                            p for n, p in opt_model.named_parameters() if (n in decay_parameters and p.requires_grad and not any([_key in n for _key in lr_multi_dict.keys()]))
-                        ],
-                        "weight_decay": self.args.weight_decay,
-                    },
-                    {
-                        "params": [
-                            p for n, p in opt_model.named_parameters() if (n not in decay_parameters and p.requires_grad and not any([_key in n for _key in lr_multi_dict.keys()]))
-                        ],
-                        "weight_decay": 0.0,
-                    },
-                ]
-                for _key in lr_multi_dict:
-                    _key_decay = [
-                            p for n, p in opt_model.named_parameters() if (n in decay_parameters and p.requires_grad and _key in n)
-                        ]
-                    _key_no_decay = [
-                            p for n, p in opt_model.named_parameters() if (n not in decay_parameters and p.requires_grad and _key in n)
-                        ]
-                    if len(_key_decay) > 0:
-                        optimizer_grouped_parameters.append(
-                            {
-                                "params": _key_decay,
-                                "lr": self.args.learning_rate * lr_multi_dict[_key],
-                                "weight_decay": self.args.weight_decay,
-                            },
-                        )
-                    if len(_key_no_decay) > 0:
-                        optimizer_grouped_parameters.append(
-                            {
-                                "params": _key_no_decay,
-                                "lr": self.args.learning_rate * lr_multi_dict[_key],
-                                "weight_decay": 0.0,
-                            },
-                        )
-                
-            else:
-                optimizer_grouped_parameters = [
-                    {
-                        "params": [
-                            p for n, p in opt_model.named_parameters() if (n in decay_parameters and p.requires_grad)
-                        ],
-                        "weight_decay": self.args.weight_decay,
-                    },
-                    {
-                        "params": [
-                            p for n, p in opt_model.named_parameters() if (n not in decay_parameters and p.requires_grad)
-                        ],
-                        "weight_decay": 0.0,
-                    },
-                ]
+            
+            optimizer_grouped_parameters = [
+                {
+                    "params": [
+                        p for n, p in opt_model.named_parameters() if (n in decay_parameters and p.requires_grad)
+                    ],
+                    "weight_decay": self.args.weight_decay,
+                },
+                {
+                    "params": [
+                        p for n, p in opt_model.named_parameters() if (n not in decay_parameters and p.requires_grad)
+                    ],
+                    "weight_decay": 0.0,
+                },
+            ]
 
             optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args)
 

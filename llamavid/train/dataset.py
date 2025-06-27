@@ -1,18 +1,13 @@
 from typing import Dict, Any, List
 import torch
 import transformers
-from train_test import ModelArguments, DataArguments
 import json
 from torch.utils.data import Dataset
 import pandas as pd
 from pandas import read_parquet
-import copy
-import random
-
 from prompts import *
-from llamavid.conversation import conv_templates, default_conversation
-from llamavid.train.train import preprocess, preprocess_multimodal
 from llamavid.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
+from dataclasses import dataclass, field
 
 prompt_map = {
     'single_product_title_prompt': single_product_title_prompt
@@ -67,7 +62,6 @@ class ProductParquetDataset(Dataset):
         self.prompt_template = prompt_map.get(prompt_type, single_product_title_prompt)
 
     def _build_data(self, row) -> Dict:
-        print("row:", row)
         """将产品数据转换为输入格式"""
         # 构建产品信息字符串
         product_info = {
@@ -106,14 +100,20 @@ class ProductParquetDataset(Dataset):
 
         # prompt
         modify_prompt = user_prompts.replace('<image>', '').strip()
-        modify_prompt += assistance_answer.strip()
+        # modify_prompt += assistance_answer.strip() 不应该加上answer的内容。
 
-        return {
-            "input_ids": torch.tensor(input_ids, dtype=torch.long),
+        # product，（n,product_seq_len,emb_dim）
+        # tofix:以后n可能不止1
+        products = convert_base64(product_info['embedding']).unsqueeze(0)
+
+        data_dict = {
+            "input_ids": torch.tensor(input_ids, dtype=torch.long), 
             "labels": torch.tensor(labels, dtype=torch.long),
-            "prompt": modify_prompt,
-            "products": convert_base64(product_info['embedding'])
+            "prompts": [modify_prompt],
+            "products": products
         }
+
+        return data_dict
 
 
     def __len__(self):
@@ -125,7 +125,6 @@ class ProductParquetDataset(Dataset):
         """
         data = self.df.iloc[i]          
         instructions = self._build_data(dict(data))
-
         return instructions
 
     def get_sample_data(self, n=5):
@@ -145,17 +144,16 @@ class ProductParquetDataset(Dataset):
         }
         return stats
 
-
-class ProductDataCollator:
+@dataclass
+class ProductDataCollator(object):
     """数据收集器，用于批处理"""
-    
-    def __init__(self, tokenizer: transformers.PreTrainedTokenizer):
-        self.tokenizer = tokenizer
+
+    tokenizer: transformers.PreTrainedTokenizer
     
     def __call__(self, instances: List[Dict]) -> Dict[str, torch.Tensor]:
         """将多个样本组合成一个batch"""
         # 收集input_ids和labels
-        input_ids = [instance['input_ids'] for instance in instances if 'input_ids' in instance]
+        input_ids = [instance['input_ids'] for instance in instances if 'input_ids' in instance]        
         labels = [instance['labels'] for instance in instances if 'labels' in instance]
         
         if len(input_ids) == 0:
@@ -177,13 +175,15 @@ class ProductDataCollator:
 
         # 如果有产品数据
         if 'products' in instances[0]:
-            products = [instance['products'] for instance in instances]
-            batch['products'] = torch.stack(products, dim=0)
+            batch["products"] = [instance['products'] for instance in instances]
+        else:
+            batch["products"] = [torch.tensor([], dtype=torch.float16) for _ in instances]
 
         # 如果有prompt数据
-        if 'prompt' in instances[0]:
-            batch['prompts'] = [[instance['prompt']] for instance in instances]
-        
+        if 'prompts' in instances[0]:
+            batch['prompts'] = [instance['prompts'] for instance in instances]
+        else:
+            batch['prompts'] = [[''] for _ in instances]
         return batch
 
 
@@ -193,7 +193,7 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
     train_dataset = ProductParquetDataset(
         data_path=data_args.data_path,
         tokenizer=tokenizer,
-        data_args=data_args
+        prompt_type=data_args.input_prompt
     )
     
     data_collator = ProductDataCollator(tokenizer=tokenizer)

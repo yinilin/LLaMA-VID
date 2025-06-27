@@ -33,6 +33,7 @@ import transformers
 
 from llamavid.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 from torch.utils.data import Dataset
+from llamavid.train.dataset import make_supervised_data_module
 from llamavid.train.llava_trainer import LLaVATrainer
 
 from llamavid import conversation as conversation_lib
@@ -70,6 +71,8 @@ class DataArguments:
     image_folder: Optional[str] = field(default=None)
     input_prompt: Optional[str] = field(default=None)
     refine_prompt: Optional[bool] = field(default=False)
+    max_seq_length: int = field(default=512)
+    mm_hidden_size: int = field(default=96)
 
 
 @dataclass
@@ -122,34 +125,27 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
         del state_dict
         trainer._save(output_dir, state_dict=cpu_state_dict)  # noqa
 
-def train():
+def train(model_args, data_args, training_args):
     global local_rank
 
-    parser = transformers.HfArgumentParser(
-        (ModelArguments, DataArguments, TrainingArguments))
-    model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     local_rank = training_args.local_rank
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
     bnb_model_from_pretrained_args = dict(
         torch_dtype=(torch.float32 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32)),
     )
 
-    config = transformers.AutoConfig.from_pretrained(model_args.model_name_or_path, trust_remote_code=True)
+    config = transformers.AutoConfig.from_pretrained(model_args.model_name_or_path)
+    config.mm_hidden_size = data_args.mm_hidden_size
 
-    model = LlavaLlamaAttForCausalLM.from_pretrained(
+    '''model = LlavaLlamaAttForCausalLM.from_pretrained(
         model_args.model_name_or_path,
         config=config,
-        cache_dir=training_args.cache_dir,
-        **bnb_model_from_pretrained_args
-    )
-    model.config.use_cache = False
+        local_files_only=True
+    )'''
+    model = LlavaLlamaAttForCausalLM(config=config)
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         model_args.model_name_or_path,
-        cache_dir=training_args.cache_dir,
-        model_max_length=training_args.model_max_length,
-        padding_side="right",
-        use_fast=False,
     )
 
     model.get_model().initialize_vision_modules(
@@ -157,27 +153,23 @@ def train():
         fsdp=training_args.fsdp,
         max_token=training_args.model_max_length
     )
-
+    
     model.config.tune_mm_mlp_adapter = training_args.tune_mm_mlp_adapter = model_args.tune_mm_mlp_adapter
     if model_args.tune_mm_mlp_adapter:
         model.requires_grad_(False)
         for p in model.get_model().mm_projector.parameters():
             p.requires_grad = True
 
-        if training_args.bits in [4, 8]:
-            model.get_model().mm_projector.to(dtype=compute_dtype, device=training_args.device)
-
     # all the attention modules require grad
     model.get_model().initialize_attention_modules(model_args)
 
     # dataset
-    train_dataset = None
-    eval_dataset = None
+    data_module = make_supervised_data_module(tokenizer=tokenizer,
+                                              data_args=data_args)
     trainer = LLaVATrainer(model=model,
                     tokenizer=tokenizer,
                     args=training_args,
-                    train_dataset=train_dataset,
-                    eval_dataset=eval_dataset
+                    **data_module
                     )
 
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
@@ -187,42 +179,9 @@ def train():
     trainer.save_state()
 
     safe_save_model_for_hf_trainer(trainer=trainer,
-                                    output_dir=training_args.output_dir)
-
-if __name__ == "__main__":
-    # train()
-
-    model_args = ModelArguments(
-        model_name_or_path="data/vicuna-7b-v1.5",
-        bert_type="raw_bert_layer:2",
-        compress_type = "mean",
-        tune_mm_mlp_adapter = True
-    )
-    print(model_args)
-
-    
-    config = transformers.AutoConfig.from_pretrained(model_args.model_name_or_path)
-    # print(config)
-    model = LlavaLlamaAttForCausalLM(config)  # 创建模型
-    tokenizer = transformers.AutoTokenizer.from_pretrained(
-        model_args.model_name_or_path
-    )
-    training_args = TrainingArguments(
-        output_dir="data/output_model_with_adapter",
-    )
-    model.config.tune_mm_mlp_adapter = training_args.tune_mm_mlp_adapter = model_args.tune_mm_mlp_adapter
-    # dataset
-    train_dataset = None
-    eval_dataset = None
-    trainer = LLaVATrainer(model=model,
-                    tokenizer=tokenizer,
-                    train_dataset=train_dataset,
-                    eval_dataset=eval_dataset,
-                    args=training_args
-                    )
-    safe_save_model_for_hf_trainer(trainer=trainer,
                                     output_dir="data/output_model_with_adapter")
-    
+
+def load_pretrained_model(model_path: str, model_base: str):
     model_path = model_args.model_name_or_path
     model_base = "data/output_model_with_adapter/"
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_base)
@@ -232,3 +191,31 @@ if __name__ == "__main__":
     mm_projector_weights = torch.load(os.path.join(model_base, 'mm_projector.bin'), map_location='cpu')
     mm_projector_weights = {k: v.to(torch.float16) for k, v in mm_projector_weights.items()}
     model.load_state_dict(mm_projector_weights, strict=False)
+
+    return tokenizer, model
+
+if __name__ == "__main__":
+    # train()
+
+    model_args = ModelArguments(
+        model_name_or_path="data/output_model_with_adapter",
+        bert_type="raw_bert_layer:2",
+        compress_type = "mean",
+        tune_mm_mlp_adapter = True
+    )
+
+
+    training_args = TrainingArguments(
+        output_dir="data/output_model_with_adapter",
+        per_device_train_batch_size=8,
+        per_device_eval_batch_size=4,
+        num_train_epochs=1
+    )
+    
+    data_args = DataArguments(
+        data_path="data/dataset/part-00000.parquet",
+        input_prompt="single_product_title_prompt",
+        max_seq_length=512,
+        mm_hidden_size=96
+    )
+    train(model_args, data_args, training_args)
