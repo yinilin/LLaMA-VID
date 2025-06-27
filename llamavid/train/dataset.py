@@ -23,8 +23,8 @@ def convert_base64(b64_string: str) -> List[int]:
     # Step 1: Decode Base64 to bytes
     byte_data = base64.b64decode(b64_string)
 
-    # Step 2: Convert bytes to float16 array
-    float_array = np.frombuffer(byte_data, dtype=np.float16)
+    # Step 2: Convert bytes to float32 array
+    float_array = np.frombuffer(byte_data, dtype=np.float32)
 
     return torch.tensor(float_array)
 

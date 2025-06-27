@@ -209,13 +209,14 @@ if __name__ == "__main__":
         output_dir="data/output_model_with_adapter",
         per_device_train_batch_size=8,
         per_device_eval_batch_size=4,
-        num_train_epochs=1
+        num_train_epochs=1,
+        use_mps_device= True
     )
     
     data_args = DataArguments(
         data_path="data/dataset/part-00000.parquet",
         input_prompt="single_product_title_prompt",
         max_seq_length=512,
-        mm_hidden_size=96
+        mm_hidden_size=48
     )
     train(model_args, data_args, training_args)
