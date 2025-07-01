@@ -8,7 +8,7 @@ class LlavaConfig(LlamaConfig):
     model_type = "llava"
 
 if __name__ == "__main__":
-    from llamavid.train.train import ModelArguments
+    from llamavid.train.train_test import ModelArguments
     model_args = ModelArguments(
         model_name_or_path="data/vicuna-7b-v1.5",
         bert_type="raw_bert_layer:2",
