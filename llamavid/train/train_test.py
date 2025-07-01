@@ -38,7 +38,6 @@ from llamavid.train.llava_trainer import LLaVATrainer
 
 from llamavid import conversation as conversation_lib
 from llamavid.model import *
-from llava.mm_utils import tokenizer_image_token
 
 from PIL import Image
 from decord import VideoReader, cpu

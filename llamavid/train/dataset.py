@@ -5,7 +5,7 @@ import json
 from torch.utils.data import Dataset
 import pandas as pd
 from pandas import read_parquet
-from prompts import *
+from llamavid.train.prompts import *
 from llamavid.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 from dataclasses import dataclass, field
 
