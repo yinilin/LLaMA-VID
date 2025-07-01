@@ -67,10 +67,7 @@ class ModelArguments:
 class DataArguments:
     data_path: str = field(default=None,
                            metadata={"help": "Path to the training data."})
-    lazy_preprocess: bool = False
-    image_folder: Optional[str] = field(default=None)
     input_prompt: Optional[str] = field(default=None)
-    refine_prompt: Optional[bool] = field(default=False)
     max_seq_length: int = field(default=512)
     mm_hidden_size: int = field(default=96)
 

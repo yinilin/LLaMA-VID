@@ -1,0 +1,5 @@
+output_dir: data/output_model_with_adapter
+per_device_train_batch_size: 8
+per_device_eval_batch_size: 4
+num_train_epochs: 1
+use_mps_device: True

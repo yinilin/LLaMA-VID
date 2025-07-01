@@ -1,0 +1,7 @@
+model_name_or_path: data/output_model_with_adapter
+version: v0
+tune_mm_mlp_adapter: True
+pretrain_mm_mlp_adapter: None
+mm_projector_type: linear
+bert_type: raw_bert_layer:2
+compress_type: mean
