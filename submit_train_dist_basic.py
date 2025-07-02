@@ -19,7 +19,7 @@ def get_task_cmd(main_file, model_config, data_config, train_config):
 
 def get_task(main_file, model_config: str, data_config: str, train_config: str, cluster):
     this_task = pykrylov.Task(get_task_cmd, [main_file, model_config, data_config, train_config],
-                              docker_image='hub.tess.io/quccoe/qu_dev_images:xiaohuli_mm_v2')
+                              docker_image='hub.tess.io/quccoe/qu_dev_images:aipshits')
 
     this_task.add_file(f'./{main_file}')
     this_task.add_package('llamavid')
@@ -28,7 +28,7 @@ def get_task(main_file, model_config: str, data_config: str, train_config: str, 
     this_task.add_memory(450)
     # this_task.run_on_gpu(4, 'a100')
     this_task.add_execution_parameter('accelerator', {'type': 'gpu', 'quantity': '4'})
-    this_task.mount_pvc('yinilin', 'krylov-user-pvc-yinilin', cluster=cluster)  ###这个咋改？
+    this_task.mount_pvc('yinilin', 'krylov-user-pvc-qu-nav-ccoe', cluster=cluster)
     return this_task
 
 
@@ -37,7 +37,7 @@ if __name__ == '__main__':
 
     # parser.add_argument('--namespace', default='search-preemptive-a100', type=str)
     parser.add_argument('--namespace', default='ebay', type=str)
-    parser.add_argument('--cluster', default='tess94', type=str)
+    parser.add_argument('--cluster', default='tess57', type=str)
     parser.add_argument('--main_file', default='train_mem.py', type=str)
     parser.add_argument('--model_config', default='model_config.yml', type=str)
     parser.add_argument('--data_config', default='data_config.yml', type=str)
@@ -55,7 +55,7 @@ if __name__ == '__main__':
 
     project_name = 'test010'
     job_name = 'llamavid_train'
-    experiment_name = 'v1'
+    experiment_name = 'version_1'
 
     session = pykrylov.Session(namespace=args.namespace, project_name=project_name, job_name=job_name,
                                do_check_update=False)

@@ -206,7 +206,9 @@ if __name__ == "__main__":
         per_device_train_batch_size=8,
         per_device_eval_batch_size=4,
         num_train_epochs=1,
-        use_mps_device= True
+        # use_mps_device= True,
+        save_steps=100,
+        save_total_limit=1
     )
     
     data_args = DataArguments(
