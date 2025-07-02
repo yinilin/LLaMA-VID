@@ -125,10 +125,6 @@ def train(model_args, data_args, training_args):
     global local_rank
 
     local_rank = training_args.local_rank
-    compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
-    bnb_model_from_pretrained_args = dict(
-        torch_dtype=(torch.float32 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32)),
-    )
 
     config = transformers.AutoConfig.from_pretrained(model_args.model_name_or_path)
     config.mm_hidden_size = data_args.mm_hidden_size

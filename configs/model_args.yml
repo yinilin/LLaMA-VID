@@ -1,4 +1,4 @@
-model_name_or_path: data/output_model_with_adapter
+model_name_or_path: mnt/yinilin/models/vicuna-7b-v1.5
 version: v0
 tune_mm_mlp_adapter: True
 pretrain_mm_mlp_adapter: None

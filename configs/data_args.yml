@@ -1,4 +1,4 @@
-data_path: data/dataset/part-00000.parquet
+data_path: mnt/yinilin/data_0702/bin_0/
 input_prompt: single_product_title_prompt
 max_seq_length: 512
 mm_hidden_size: 48
