@@ -60,6 +60,7 @@ class ModelArguments:
     mm_projector_type: Optional[str] = field(default='linear')
     bert_type: Optional[str] = field(default="qformer_pretrain")
     compress_type: Optional[str] = field(default=None)
+    bert_path: Optional[str] = field(default="/mnt/yinilin/yinilin/models/bert-base-uncased", metadata={"help": "Path to the BERT model."})
 
 
 @dataclass
@@ -68,7 +69,7 @@ class DataArguments:
                            metadata={"help": "Path to the training data."})
     input_prompt: Optional[str] = field(default=None)
     max_seq_length: int = field(default=512)
-    mm_hidden_size: int = field(default=96)
+    mm_hidden_size: int = field(default=48)
 
 
 @dataclass
@@ -164,23 +165,19 @@ def train(model_args, data_args, training_args):
                     **data_module
                     )
 
-    if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
-        trainer.train(resume_from_checkpoint=True)
-    else:
-        trainer.train()
+    # trainer.train()
+    
     trainer.save_state()
 
     safe_save_model_for_hf_trainer(trainer=trainer,
                                     output_dir="data/output_model_with_adapter")
 
-def load_pretrained_model(model_path: str, model_base: str):
-    model_path = model_args.model_name_or_path
-    model_base = "data/output_model_with_adapter/"
+def load_pretrained_model(model_base: str, model_path: str):
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_base)
     cfg_pretrained = transformers.AutoConfig.from_pretrained(model_path)
     model = LlavaLlamaAttForCausalLM.from_pretrained(model_base, config=cfg_pretrained, local_files_only=True)
 
-    mm_projector_weights = torch.load(os.path.join(model_base, 'mm_projector.bin'), map_location='cpu')
+    mm_projector_weights = torch.load(os.path.join(model_path, 'mm_projector.bin'), map_location='cpu')
     mm_projector_weights = {k: v.to(torch.float16) for k, v in mm_projector_weights.items()}
     model.load_state_dict(mm_projector_weights, strict=False)
 
@@ -190,10 +187,11 @@ if __name__ == "__main__":
     # train()
 
     model_args = ModelArguments(
-        model_name_or_path="data/output_model_with_adapter",
+        model_name_or_path="data/vicuna-7b-v1.5",
         bert_type="raw_bert_layer:2",
         compress_type = "mean",
-        tune_mm_mlp_adapter = True
+        tune_mm_mlp_adapter = True,
+        bert_path="data/bert-base-uncased"
     )
 
 

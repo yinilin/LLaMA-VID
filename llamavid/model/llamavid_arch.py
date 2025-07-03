@@ -44,7 +44,7 @@ class LLaMAVIDMetaModel:
         '''if hasattr(config, "mm_vision_tower"):
             self.vision_tower = build_vision_tower(config, delay_load=True)
             self.mm_projector = build_vision_projector(config)'''
-        self.config.mm_hidden_size = getattr(config, 'mm_hidden_size', 96)
+        self.config.mm_hidden_size = getattr(config, 'mm_hidden_size',48)
         self.mm_projector = build_vision_projector(config)
 
     def get_vision_tower(self):
@@ -81,7 +81,7 @@ class LLaMAVIDMetaModel:
         self.config.compress_type = getattr(model_args, "compress_type", None)
 
         att_feat_size = self.config.mm_hidden_size
-        self.vlm_att_tokenlizer, self.vlm_att_encoder = self.init_bert(att_feat_size, truncation_side="left")
+        self.vlm_att_tokenlizer, self.vlm_att_encoder = self.init_bert(model_args.bert_path,att_feat_size, cross_attention_freq=2, truncation_side="left")
         self.vlm_att_projector = torch.nn.Linear(self.vlm_att_encoder.config.hidden_size, self.config.mm_hidden_size)  ### 从text decoder 到 context attention的映射，得到text query
         self.vlm_att_key_projector  = torch.nn.Linear(self.config.mm_hidden_size, self.config.mm_hidden_size)  ### 从vision encoder到 context attention中的projection，是跨注意力的一部分
         self.vlm_att_val_projector  = torch.nn.Linear(self.config.mm_hidden_size, self.config.hidden_size)  ### 计算完attention后的projection部分
@@ -146,12 +146,12 @@ class LLaMAVIDMetaModel:
             self.vlm_att_val_projector = self.vlm_att_val_projector.to(device=device_type, dtype=weight_type)
             
 
-    def init_bert(self, vision_width, cross_attention_freq=2, truncation_side="right"):
+    def init_bert(self, bert_path, vision_width, cross_attention_freq=2, truncation_side="right"):
         # initialize BERT tokenizer
-        tokenizer = BertTokenizer.from_pretrained("data/bert-base-uncased", truncation_side=truncation_side)
+        tokenizer = BertTokenizer.from_pretrained(bert_path, truncation_side=truncation_side)
         tokenizer.add_special_tokens({"bos_token": "[DEC]"})
         # initialize BERT
-        encoder_config = BertConfig.from_pretrained("data/bert-base-uncased")
+        encoder_config = BertConfig.from_pretrained(bert_path)
         encoder_config.encoder_width = vision_width
         # insert cross-attention layer every other block
         encoder_config.add_cross_attention = True
@@ -160,7 +160,7 @@ class LLaMAVIDMetaModel:
         if "raw" in self.config.bert_type:
             encoder_config.is_decoder = True
             mm_model = BertLMHeadModelRaw.from_pretrained(
-                "data/bert-base-uncased", config=encoder_config
+                bert_path, config=encoder_config
             )
         else:
             raise NotImplementedError("BERT type not implemented...")

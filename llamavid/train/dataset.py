@@ -226,11 +226,13 @@ if __name__ == "__main__":
         for key, value in sample.items():
             if isinstance(value, torch.Tensor):
                 print(f"  {key}: {value.shape}")
+            elif isinstance(value, list) and isinstance(value[0], torch.Tensor):
+                print(f"  {key}: [{len(value)} tensors of shape {value[0].shape}]")
             else:
                 print(f"  {key}: {value}")
         print()
     sample = dataset.__getitem__(1)
-    print(sample)
+    print(sample['products'][0].shape)
 
     # 测试data_collator
     collator = ProductDataCollator(tokenizer=tokenizer)

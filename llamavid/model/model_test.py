@@ -40,7 +40,7 @@ if __name__ == "__main__":
     batch_size = 2
     seq_len = 6
     product_seq_len = 3
-    embedding_dim = 96
+    embedding_dim = 48
 
     # input_ids: batch 内每个样本的 token id
     input_ids = [

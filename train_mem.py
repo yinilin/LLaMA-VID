@@ -3,10 +3,11 @@
 # Make it more memory efficient by monkey patching the LLaMA model with FlashAttn.
 
 # Need to call this before importing transformers.
-from llamavid.train.llama_flash_attn_monkey_patch import replace_llama_attn_with_flash_attn
+# from llamavid.train.llama_flash_attn_monkey_patch import replace_llama_attn_with_flash_attn
 import argparse
 import yaml
-replace_llama_attn_with_flash_attn()
+import os
+# replace_llama_attn_with_flash_attn()
 
 from llamavid.train.train_test import train
 from llamavid.train.train_test import ModelArguments, DataArguments, TrainingArguments
@@ -33,4 +34,21 @@ if __name__ == "__main__":
     print("model_args:", model_args)
     print("data_args:", data_args)
     print("training_args:", training_args)
+
+    def list_directory_contents(directory_path):
+        try:
+            # 获取目录中的所有文件和文件夹
+            entries = os.listdir(directory_path)
+
+            print(f"Contents of '{directory_path}':")
+            for entry in entries:
+                print(entry)
+
+        except FileNotFoundError:
+            print(f"The directory '{directory_path}' does not exist.")
+        except PermissionError:
+            print(f"Permission denied to access the directory '{directory_path}'.")
+    print("check directory contents")
+    list_directory_contents("/mnt/yinilin/yinilin")
+
     train(model_args, data_args, training_args)

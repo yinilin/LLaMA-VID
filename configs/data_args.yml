@@ -1,4 +1,4 @@
-data_path: mnt/yinilin/data_0702/bin_0/
+data_path: /mnt/yinilin/yinilin/data_0702/bin_0/part-00000-8e88be9a-ff3f-465e-9e41-c90342ae9786-c000.snappy.parquet
 input_prompt: single_product_title_prompt
 max_seq_length: 512
 mm_hidden_size: 48

@@ -1,6 +1,10 @@
-output_dir: mnt/yinilin/output
+output_dir: /mnt/yinilin/yinilin/output
 per_device_train_batch_size: 4
 per_device_eval_batch_size: 4
-num_train_epochs: 1,
-save_steps: 100,
+num_train_epochs: 1
+warmup_steps: 100
+save_steps: 100
 save_total_limit: 1
+logging_steps: 100
+resume_from_checkpoint: False
+learning_rate: 5e-05

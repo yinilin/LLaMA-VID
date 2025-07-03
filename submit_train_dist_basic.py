@@ -16,7 +16,7 @@ def get_task_cmd(main_file, model_config, data_config, train_config):
     training_conf = os.path.join(task_folder, 'configs', train_config)
     model_config = os.path.join(task_folder, 'configs', model_config)
     data_config = os.path.join(task_folder, 'configs', data_config)
-    cmd = f'{calling_file} --model_config {model_config} --data_config {data_config} --train_config {training_conf}'
+    cmd = f'python {calling_file} --model_config {model_config} --data_config {data_config} --train_config {training_conf}'
     os.system(cmd)
 
 
@@ -42,9 +42,9 @@ if __name__ == '__main__':
     parser.add_argument('--namespace', default='ebay', type=str)
     parser.add_argument('--cluster', default='tess94', type=str)
     parser.add_argument('--main_file', default='train_mem.py', type=str)
-    parser.add_argument('--model_config', default='model_config.yml', type=str)
-    parser.add_argument('--data_config', default='data_config.yml', type=str)
-    parser.add_argument('--train_config', default='train_config.yml', type=str)
+    parser.add_argument('--model_config', default='model_args.yml', type=str)
+    parser.add_argument('--data_config', default='data_args.yml', type=str)
+    parser.add_argument('--train_config', default='train_args.yml', type=str)
 
     args = parser.parse_args()
 
