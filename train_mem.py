@@ -14,9 +14,9 @@ from llamavid.train.train_test import ModelArguments, DataArguments, TrainingArg
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='llamavid train')
 
-    parser.add_argument('--model_config', default='config/model_config.yml', type=str)
-    parser.add_argument('--train_config', default='config/train_config.yml', type=str)
-    parser.add_argument('--data_config', default='config/data_config.yml', type=str)
+    parser.add_argument('--model_config', default='configs/model_args.yml', type=str)
+    parser.add_argument('--train_config', default='configs/train_args.yml', type=str)
+    parser.add_argument('--data_config', default='configs/data_args.yml', type=str)
 
 
     args = parser.parse_args()
