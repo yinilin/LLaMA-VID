@@ -2,8 +2,13 @@
 # Modified from LLaVA (https://github.com/haotian-liu/LLaVA)
 # ------------------------------------------------------------------------
 import os
+import random
+import numpy as np
 import torch
 import torch.nn as nn
+import transformers
+import json
+from llamavid.model.language_model.llava_llama_vid import LlavaLlamaAttForCausalLM
 
 try:
     import smdistributed.modelparallel.torch as smp
@@ -14,6 +19,7 @@ from fairscale.optim import OSS
 from torch.utils.data import Sampler
 
 from transformers import Trainer
+from transformers.trainer import *
 from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
 from transformers.trainer_pt_utils import (
     get_parameter_names,
@@ -28,7 +34,7 @@ from transformers.utils import (
 )
 
 from typing import List, Optional, Union, Dict, Any
-
+from transformers.trainer import TRAINING_ARGS_NAME, TRAINER_STATE_NAME, OPTIMIZER_NAME, SCHEDULER_NAME, SCALER_NAME
 logger = logging.get_logger(__name__)
 
 def maybe_zero_3(param, ignore_status=False, name=None):
@@ -217,14 +223,21 @@ class LLaVATrainer(Trainer):
 
         return self.optimizer
 
-    def _save_checkpoint(self, model, trial, metrics=None):
+    def _load_from_checkpoint(self, resume_from_checkpoint, model=None):
         if getattr(self.args, 'tune_mm_mlp_adapter', False):
-            from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
-            checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
+            if os.path.isfile(os.path.join(resume_from_checkpoint, 'mm_projector.bin')):
+                weight_to_load = torch.load(os.path.join(resume_from_checkpoint, 'mm_projector.bin'))
+                def get_w(weights, keyword):
+                    return {k.split(keyword + '.')[1]: v for k, v in weights.items() if keyword in k}
+                self.model.get_model().mm_projector.load_state_dict(get_w(weight_to_load, 'mm_projector'))
+                print(f"Loaded mm_projector weights from {resume_from_checkpoint}")
+            else:
+                print(f"no mm_projector weights in {resume_from_checkpoint}")
+        else:
+            super(LLaVATrainer, self)._load_from_checkpoint(resume_from_checkpoint, model=model)
 
-            run_dir = self._get_output_dir(trial=trial)
-            output_dir = os.path.join(run_dir, checkpoint_folder)
-
+    def save_model(self, output_dir: Optional[str] = None, _internal_call: bool = False):
+        if getattr(self.args, 'tune_mm_mlp_adapter', False):
             # Only save Adapter
             keys_to_match = ['mm_projector', 'vision_resampler', 'vlm_att']
             if getattr(self.args, "use_im_start_end", False):
@@ -236,10 +249,51 @@ class LLaVATrainer(Trainer):
                 self.model.config.save_pretrained(output_dir)
                 torch.save(weight_to_save, os.path.join(output_dir, f'mm_projector.bin'))
         else:
-            super(LLaVATrainer, self)._save_checkpoint(model, trial, metrics)
+            super(LLaVATrainer, self).save_model(output_dir=output_dir, _internal_call=_internal_call)
 
     def _save(self, output_dir: Optional[str] = None, state_dict=None):
         if getattr(self.args, 'tune_mm_mlp_adapter', False):
             pass
         else:
             super(LLaVATrainer, self)._save(output_dir, state_dict)
+
+    def _load_rng_state(self, checkpoint):
+        # Load RNG states from `checkpoint`
+        if checkpoint is None:
+            return
+
+        if self.args.world_size > 1:
+            process_index = self.args.process_index
+            rng_file = os.path.join(checkpoint, f"rng_state_{process_index}.pth")
+            if not os.path.isfile(rng_file):
+                logger.info(
+                    f"Didn't find an RNG file for process {process_index}, if you are resuming a training that "
+                    "wasn't launched in a distributed fashion, reproducibility is not guaranteed."
+                )
+                return
+        else:
+            rng_file = os.path.join(checkpoint, "rng_state.pth")
+            if not os.path.isfile(rng_file):
+                logger.info(
+                    "Didn't find an RNG file, if you are resuming a training that was launched in a distributed "
+                    "fashion, reproducibility is not guaranteed."
+                )
+                return
+
+        checkpoint_rng_state = torch.load(rng_file, weights_only=False)
+        random.setstate(checkpoint_rng_state["python"])
+        np.random.set_state(checkpoint_rng_state["numpy"])
+        torch.random.set_rng_state(checkpoint_rng_state["cpu"])
+        if torch.cuda.is_available():
+            if self.args.parallel_mode == ParallelMode.DISTRIBUTED:
+                torch.cuda.random.set_rng_state_all(checkpoint_rng_state["cuda"])
+            else:
+                try:
+                    torch.cuda.random.set_rng_state(checkpoint_rng_state["cuda"])
+                except Exception as e:
+                    logger.info(
+                        f"Didn't manage to set back the RNG states of the GPU because of the following error:\n {e}"
+                        "\nThis won't yield the same results as if the training had not been interrupted."
+                    )
+        if is_torch_tpu_available():
+            xm.set_rng_state(checkpoint_rng_state["xla"])

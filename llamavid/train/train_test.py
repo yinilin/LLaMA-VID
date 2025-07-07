@@ -45,7 +45,6 @@ from decord import VideoReader, cpu
 
 local_rank = None
 
-
 def rank0_print(*args):
     if local_rank == 0:
         print(*args)
@@ -123,6 +122,7 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
         trainer._save(output_dir, state_dict=cpu_state_dict)  # noqa
 
 def train(model_args, data_args, training_args):
+    torch.cuda.empty_cache()
     global local_rank
 
     local_rank = training_args.local_rank
@@ -130,12 +130,12 @@ def train(model_args, data_args, training_args):
     config = transformers.AutoConfig.from_pretrained(model_args.model_name_or_path)
     config.mm_hidden_size = data_args.mm_hidden_size
 
-    '''model = LlavaLlamaAttForCausalLM.from_pretrained(
+    model = LlavaLlamaAttForCausalLM.from_pretrained(
         model_args.model_name_or_path,
         config=config,
         local_files_only=True
-    )'''
-    model = LlavaLlamaAttForCausalLM(config=config)
+    )
+    # model = LlavaLlamaAttForCausalLM(config=config)
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         model_args.model_name_or_path,
@@ -148,13 +148,19 @@ def train(model_args, data_args, training_args):
     )
     
     model.config.tune_mm_mlp_adapter = training_args.tune_mm_mlp_adapter = model_args.tune_mm_mlp_adapter
+    training_args.pretrain_mm_mlp_adapter = model_args.pretrain_mm_mlp_adapter
     if model_args.tune_mm_mlp_adapter:
         model.requires_grad_(False)
         for p in model.get_model().mm_projector.parameters():
             p.requires_grad = True
-
+            
     # all the attention modules require grad
     model.get_model().initialize_attention_modules(model_args)
+
+    '''print("Trainable modules:")
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            print(name)'''
 
     # dataset
     data_module = make_supervised_data_module(tokenizer=tokenizer,
@@ -165,12 +171,15 @@ def train(model_args, data_args, training_args):
                     **data_module
                     )
 
-    # trainer.train()
+    if training_args.resume_from_checkpoint:
+        trainer.train(training_args.resume_from_checkpoint)
+    else:
+        trainer.train()
     
     trainer.save_state()
 
     safe_save_model_for_hf_trainer(trainer=trainer,
-                                    output_dir="data/output_model_with_adapter")
+                                    output_dir=training_args.output_dir)
 
 def load_pretrained_model(model_base: str, model_path: str):
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_base)
@@ -191,22 +200,25 @@ if __name__ == "__main__":
         bert_type="raw_bert_layer:2",
         compress_type = "mean",
         tune_mm_mlp_adapter = True,
-        bert_path="data/bert-base-uncased"
+        bert_path="data/bert-base-uncased",
+        # pretrain_mm_mlp_adapter="data/output_model_with_adapter/checkpoint-11/mm_projector.bin"
     )
 
 
     training_args = TrainingArguments(
         output_dir="data/output_model_with_adapter",
-        per_device_train_batch_size=8,
+        per_device_train_batch_size=4,
         per_device_eval_batch_size=4,
         num_train_epochs=1,
         # use_mps_device= True,
-        save_steps=100,
-        save_total_limit=1
+        save_steps=1,
+        save_total_limit=1,
+        logging_steps=1,
+        resume_from_checkpoint=True
     )
     
     data_args = DataArguments(
-        data_path="data/dataset/part-00000.parquet",
+        data_path="data/dataset/bin_0/part-00000.parquet",
         input_prompt="single_product_title_prompt",
         max_seq_length=512,
         mm_hidden_size=48

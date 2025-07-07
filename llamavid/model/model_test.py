@@ -17,7 +17,9 @@ if __name__ == "__main__":
     print(model_args)
     config = transformers.AutoConfig.from_pretrained(model_args.model_name_or_path)
     # print(config)
-    model = LlavaLlamaAttForCausalLM(config)  # 创建模型
+    # model = LlavaLlamaAttForCausalLM(config)  # 创建模型
+    # model.load_state_dict(torch.load(model_args.model_name_or_path))  # 加载模型权重
+    model = LlavaLlamaAttForCausalLM.from_pretrained(model_args.model_name_or_path, config=config, local_files_only=True)
     # print(model)  # 打印模型
 
     # 构造随机输入
